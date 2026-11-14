@@ -1,3 +1,38 @@
+DROP SCHEMA IF EXISTS test CASCADE;
+CREATE SCHEMA test;
+SET SEARCH_PATH = test;
+
+CREATE TABLE spec (
+    id INTEGER PRIMARY KEY,
+    table_name TEXT NOT NULL,
+    column_name TEXT NOT NULL,
+    current_max_value INTEGER NOT NULL,
+    trigger_name TEXT
+);
+
+INSERT INTO spec (id, table_name, column_name, current_max_value)
+VALUES (1, 'spec', 'id', 1);
+
+CREATE OR REPLACE FUNCTION sync_spec_trigger()
+RETURNS TRIGGER AS $$
+DECLARE
+    v_col_name TEXT := TG_ARGV[0]; 
+    v_new_val INTEGER;
+BEGIN
+    EXECUTE format('SELECT ($1).%I::integer', v_col_name) INTO v_new_val USING NEW;
+
+    IF v_new_val IS NOT NULL THEN
+        UPDATE spec
+        SET current_max_value = v_new_val
+        WHERE table_name = TG_TABLE_NAME 
+          AND column_name = v_col_name
+          AND current_max_value < v_new_val;
+    END IF;
+    
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
 CREATE OR REPLACE FUNCTION get_next_id(p_table_name TEXT, p_column_name TEXT)
 RETURNS INTEGER AS $$
 DECLARE
@@ -5,7 +40,42 @@ DECLARE
     v_next_val INTEGER;
     v_new_id INTEGER;
     v_trigger_name TEXT;
+    v_trigger_count INTEGER;
+    v_table_exists BOOLEAN;
+    v_column_exists BOOLEAN;
+    v_column_type TEXT;
+    v_suffix INTEGER := 1;
 BEGIN
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.tables 
+        WHERE table_schema = current_schema() AND table_name = p_table_name
+    ) INTO v_table_exists;
+
+    IF NOT v_table_exists THEN
+        RAISE EXCEPTION 'ОШИБКА: Таблицы "%" не существует.', p_table_name;
+    END IF;
+
+    SELECT EXISTS (
+        SELECT 1 FROM information_schema.columns 
+        WHERE table_schema = current_schema() 
+          AND table_name = p_table_name 
+          AND column_name = p_column_name
+    ) INTO v_column_exists;
+
+    IF NOT v_column_exists THEN
+        RAISE EXCEPTION 'ОШИБКА: Столбца "%" нет в таблице "%".', p_column_name, p_table_name;
+    END IF;
+
+    SELECT data_type INTO v_column_type
+    FROM information_schema.columns
+    WHERE table_schema = current_schema() 
+      AND table_name = p_table_name 
+      AND column_name = p_column_name;
+
+    IF v_column_type NOT IN ('integer', 'smallint', 'bigint') THEN
+        RAISE EXCEPTION 'ОШИБКА: Столбец "%" имеет тип "%", нужен целочисленный (integer).', p_column_name, v_column_type;
+    END IF;
+
     SELECT current_max_value INTO v_current_max
     FROM spec
     WHERE table_name = p_table_name AND column_name = p_column_name;
@@ -21,7 +91,20 @@ BEGIN
         
         v_new_id := get_next_id('spec', 'id');
         
-        v_trigger_name := format('trg_sync_%s_%s', p_table_name, p_column_name);
+        SELECT COUNT(*) INTO v_trigger_count
+        FROM pg_trigger
+        WHERE tgrelid = p_table_name::regclass AND NOT tgisinternal;
+
+        v_trigger_name := format('%s_%s_%s', p_table_name, p_column_name, v_trigger_count + 1);
+
+        WHILE EXISTS (
+            SELECT 1 FROM pg_trigger 
+            WHERE tgname = v_trigger_name 
+              AND tgrelid = p_table_name::regclass
+        ) LOOP
+            v_trigger_name := format('%s_v%s', v_trigger_name, v_suffix);
+            v_suffix := v_suffix + 1;
+        END LOOP;
 
         EXECUTE format('
             CREATE TRIGGER %I
@@ -37,16 +120,23 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
+
+SELECT get_next_id('not_existed_table', 'id');
+
 CREATE TABLE test (id INTEGER);
-SELECT get_next_id('test', 'id'); 
-SELECT * FROM spec; 
+SELECT get_next_id('test', 'not_existed_column');
 
-INSERT INTO test (id) VALUES (100);
-SELECT * FROM spec; 
+CREATE TABLE test_text (id INTEGER, name TEXT);
+SELECT get_next_id('test_text', 'name');
 
-SELECT get_next_id('test', 'id'); 
+CREATE TABLE test_ok (id INTEGER);
+SELECT get_next_id('test_ok', 'id'); 
+SELECT * FROM spec WHERE table_name = 'test_ok';
 
-UPDATE test SET id = 500 WHERE id = 100;
-SELECT * FROM spec; 
+CREATE TABLE test_vasi (id INTEGER);
+CREATE TRIGGER test_vasi_id_2
+AFTER INSERT ON test_vasi
+FOR EACH ROW EXECUTE FUNCTION sync_spec_trigger('id');
 
-SELECT get_next_id('test', 'id'); 
+SELECT get_next_id('test_vasi', 'id'); 
+SELECT * FROM spec WHERE table_name = 'test_vasi';
