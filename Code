@@ -40,7 +40,7 @@ DECLARE
     v_next_val INTEGER;
     v_new_id INTEGER;
     v_trigger_name TEXT;
-    v_suffix INTEGER := 1; -- Переменная для суффикса _v1, _v2
+    v_suffix INTEGER := 1;
 BEGIN
     SELECT current_max_value INTO v_current_max
     FROM spec
@@ -73,6 +73,7 @@ BEGIN
             AFTER INSERT OR UPDATE ON %I
             FOR EACH ROW EXECUTE FUNCTION sync_spec_trigger(%L)
         ', v_trigger_name, p_table_name, p_column_name);
+
         INSERT INTO spec (id, table_name, column_name, current_max_value, trigger_name)
         VALUES (v_new_id, p_table_name, p_column_name, v_next_val, v_trigger_name);
 
@@ -93,4 +94,4 @@ SELECT get_next_id('test', 'id');
 UPDATE test SET id = 500 WHERE id = 100;
 SELECT * FROM spec; 
 
-SELECT get_next_id('test', 'id'); 
+SELECT get_next_id('test', 'id');
