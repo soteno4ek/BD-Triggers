@@ -40,6 +40,7 @@ DECLARE
     v_next_val INTEGER;
     v_new_id INTEGER;
     v_trigger_name TEXT;
+    v_suffix INTEGER := 1; -- Переменная для суффикса _v1, _v2
 BEGIN
     SELECT current_max_value INTO v_current_max
     FROM spec
@@ -58,12 +59,20 @@ BEGIN
         
         v_trigger_name := format('trg_sync_%s_%s', p_table_name, p_column_name);
 
+        WHILE EXISTS (
+            SELECT 1 FROM pg_trigger 
+            WHERE tgname = v_trigger_name 
+              AND tgrelid = p_table_name::regclass
+        ) LOOP
+            v_trigger_name := format('trg_sync_%s_%s_v%s', p_table_name, p_column_name, v_suffix);
+            v_suffix := v_suffix + 1;
+        END LOOP;
+
         EXECUTE format('
             CREATE TRIGGER %I
             AFTER INSERT OR UPDATE ON %I
             FOR EACH ROW EXECUTE FUNCTION sync_spec_trigger(%L)
         ', v_trigger_name, p_table_name, p_column_name);
-
         INSERT INTO spec (id, table_name, column_name, current_max_value, trigger_name)
         VALUES (v_new_id, p_table_name, p_column_name, v_next_val, v_trigger_name);
 
